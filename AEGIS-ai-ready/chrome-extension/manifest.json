@@ -1,10 +1,36 @@
 {
   "manifest_version": 3,
   "name": "AEGIS Chrome Activity Sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "minimum_chrome_version": "120",
   "description": "Saves active website domains and durations for the AEGIS dashboard.",
-  "permissions": ["tabs", "storage", "windows", "alarms"],
-  "host_permissions": ["https://aegis-project-team.netlify.app/*", "http://localhost/*", "http://127.0.0.1/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "content_scripts": [{"matches": ["https://aegis-project-team.netlify.app/*", "http://localhost/*", "http://127.0.0.1/*"], "js": ["content.js"], "run_at": "document_idle"}]
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms",
+    "idle"
+  ],
+  "host_permissions": [
+    "https://aegis-project-team.netlify.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "AEGIS Activity",
+    "default_popup": "popup.html"
+  },
+  "incognito": "not_allowed",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://aegis-project-team.netlify.app/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
