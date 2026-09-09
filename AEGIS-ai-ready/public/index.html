@@ -1466,12 +1466,10 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
     }catch(err){ console.error('refreshLinks failed',err); }
   }
   function pendingGuardianRequestsForMe(){ return linksCache.filter(l=>l.status==='pending'); }
-  function activeGuardianForMe(){ return linksCache.find(l=>l.status==='active')||null; }
+  function activeGuardianForMe(){ return linksCache.filter(l=>l.status==='active'); }
   async function respondToGuardianRequest(linkId,accept){
     try{
       if(accept){
-        const others=linksCache.filter(l=>l.status==='active'&&l.id!==linkId);
-        await Promise.all(others.map(l=>fbDb.collection('links').doc(l.id).update({status:'replaced'})));
         await fbDb.collection('links').doc(linkId).update({status:'active'});
         toast('You\'re now sharing your summary.');
       } else {
@@ -2001,10 +1999,10 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   }
   function guardianSettingsCard() {
     const pending=pendingGuardianRequestsForMe(), active=activeGuardianForMe();
-    return `<article class="card"><div class="section-header"><div><h2>Guardian</h2><p>Who can see a summary of your activity.</p></div>${I('shield','accent')}</div>
+    return `<article class="card"><div class="section-header"><div><h2>Guardian</h2><p>Manage the guardians who can see your activity summary. You can link more than one.</p></div>${I('shield','accent')}</div>
       ${pending.length?pending.map(p=>`<div class="setting-row"><div class="setting-copy"><strong>${esc(p.guardianName)} wants to link</strong><p>They'll see a summary of your activity once you accept. You can unlink anytime.</p></div><div class="flex gap-8">${btn('Decline','respond-guardian-request','','btn btn-sm',`data-link="${p.id}" data-accept="0"`)}${btn('Accept','respond-guardian-request','check','btn btn-primary btn-sm',`data-link="${p.id}" data-accept="1"`)}</div></div>`).join(''):''}
-      ${active?`<div class="setting-row"><div class="setting-copy"><strong>${esc(active.guardianName)}</strong><p>Currently sharing your activity summary with this guardian.</p></div>${btn('Unlink','unlink-student','','btn btn-sm',`data-link="${active.id}"`)}</div>${state.guardianNotes.length?`<div class="mt-8">${state.guardianNotes.slice(-3).reverse().map(n=>`<p class="text-sm muted">"${esc(n.text)}" — ${esc(n.from)}</p>`).join('')}</div>`:''}`:''}
-      ${!pending.length&&!active?'<p class="text-sm muted">No guardian linked right now.</p>':''}</article>`;
+      ${active.length?active.map(active=>`<div class="setting-row"><div class="setting-copy"><strong>${esc(active.guardianName)}</strong><p>Currently sharing your activity summary with this guardian.</p></div>${btn('Unlink','unlink-student','','btn btn-sm',`data-link="${active.id}"`)}</div>`).join('')+`${state.guardianNotes.length?`<div class="mt-8">${state.guardianNotes.slice(-3).reverse().map(n=>`<p class="text-sm muted">"${esc(n.text)}" — ${esc(n.from)}</p>`).join('')}</div>`:''}`:''}
+      ${!pending.length&&!active.length?'<p class="text-sm muted">No guardian linked right now.</p>':''}</article>`;
   }
   function addStudentModalBody() {
     const plan=view.addStudentLimitsPlan;
@@ -2559,7 +2557,17 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
         if(snap.empty){toast('No student account found with that email. Ask them to sign up first.',true);return;}
         const studentDoc=snap.docs[0], studentName=studentDoc.data().name||'Student';
         const linkId=`${currentAccount.id}_${studentDoc.id}`;
-        return fbDb.collection('links').doc(linkId).set({guardianUid:currentAccount.id,guardianName:currentAccount.name,studentUid:studentDoc.id,studentName,status:'pending',limitsPlan:plan,proposedLimits,requestedAt:Date.now()}).then(()=>{
+        const ref=fbDb.collection('links').doc(linkId);
+        return fbDb.runTransaction(async transaction=>{
+          const existing=await transaction.get(ref);
+          const status=existing.exists?existing.data().status:null;
+          if(status==='active'||status==='pending')return status;
+          transaction.set(ref,{guardianUid:currentAccount.id,guardianName:currentAccount.name,studentUid:studentDoc.id,studentName,status:'pending',limitsPlan:plan,proposedLimits,requestedAt:Date.now()});
+          return 'sent';
+        }).then(result=>{
+          if(result==='active'){toast('You are already linked to this student.',true);return;}
+          if(result==='pending'){toast('You have already sent a request to this student. Please wait for them to accept.',true);return;}
+
           closeModal();refreshLinks();
           if(plan==='preset'&&proposedLimits.some(l=>l.minutes>0&&l.minutes<20))toast('Sent — heads up, those limits look quite strict for a start.',true);
           else toast(`Request sent to ${studentName}.`);
