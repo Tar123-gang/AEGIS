@@ -1446,15 +1446,20 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
   /* Guardian ↔ student linking via Firestore (works across devices) */
   let linksCache=[], studentDataCache={};
   async function refreshLinks(){
+    if(sampleOriginal) return;
+    const requestEpoch=sampleEpoch;
     try{
       if(role==='guardian'){
         const snap=await fbDb.collection('links').where('guardianUid','==',currentAccount.id).get();
+        if(sampleOriginal || requestEpoch!==sampleEpoch)return;
         linksCache=snap.docs.map(d=>({id:d.id,...d.data()}));
         const activeLinks=linksCache.filter(l=>l.status==='active');
         const results=await Promise.all(activeLinks.map(l=>fbDb.collection('appstate').doc(l.studentUid).get().then(s=>({uid:l.studentUid,data:s.exists?AegisBrowserSync.combine(s.data()):null})).catch(()=>({uid:l.studentUid,data:null}))));
+        if(sampleOriginal || requestEpoch!==sampleEpoch)return;
         studentDataCache={}; results.forEach(r=>{studentDataCache[r.uid]=r.data;});
       } else if(role==='student'){
         const snap=await fbDb.collection('links').where('studentUid','==',currentAccount.id).get();
+        if(sampleOriginal || requestEpoch!==sampleEpoch)return;
         linksCache=snap.docs.map(d=>({id:d.id,...d.data()}));
       }
       render();
@@ -1527,29 +1532,56 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
     target.profile.name=name; target.profile.onboarded=true;
   }
   const DEMO_NAME_POOL=['Sarah','Dimas','Nadia','Rizky','Putri','Bima','Kaia','Yusuf'];
-  function toggleDemoFill() {
-    if(role==='guardian') {
-      toast('Sample students for Guardian accounts are being upgraded for the online version — coming very soon.',true);
-      return;
-    }
-      if(!state.settings.demoFillActive) {
-        state._preDemoSnapshot=JSON.stringify({sessions:state.sessions,habits:state.habits,focusHistory:state.focusHistory,target:state.target,limits:state.limits,profile:state.profile});
-        applyDemoFillToState(state,state.profile.name&&state.profile.onboarded?state.profile.name:shuffleArr(DEMO_NAME_POOL)[0]);
-        state.settings.demoFillActive=true; save(); render();
-        toast('Sample data filled in — ready to screenshot.');
-      } else {
-        if(state._preDemoSnapshot) { try{ Object.assign(state,JSON.parse(state._preDemoSnapshot)); }catch(e){} delete state._preDemoSnapshot; }
-        state.settings.demoFillActive=false; save(); render();
-        toast('Back to your original data.');
-      }
+  let sampleOriginal=null, sampleEpoch=0;
+  function fillSamplePreview(){
+    state=blankState();
+    state.settings={...sampleOriginal.state.settings,demoFillActive:true,tourSeen:true};
+    applyDemoFillToState(state,'Sarah');
+    state.profile.goals=['Build better focus','Improve sleep'];
+    state.demo.clock=Math.max(...state.sessions.filter(s=>s.day===0).map(s=>s.start+s.minutes));
+    state.guardianNotes=[{id:'sample-note',text:'Great progress with your focus routine. Keep taking small breaks!',from:'Mrs. Maya',time:Date.now()}];
+    linksCache=[];studentDataCache={};
+    if(role==='guardian'){
+      ['Sarah','Dimas','Nadia'].forEach((name,i)=>{
+        const studentUid='sample-student-'+i, data=blankState();
+        applyDemoFillToState(data,name);
+        data.target=[360,180,300][i];data.guardianNotes=[...state.guardianNotes];
+        studentDataCache[studentUid]=data;
+        linksCache.push({id:'sample-link-'+i,studentUid,studentName:name,guardianName:'Mrs. Maya',guardianUid:currentAccount.id,status:'active'});
+      });
+      state.profile.name='Mrs. Maya';
+    }else if(role==='student')linksCache=[{id:'sample-guardian',studentUid:currentAccount.id,guardianName:'Mrs. Maya',status:'active'}];
+    view.expandedStudent=null;
   }
-  function regenerateDemoFill() {
-    if(role==='guardian') {
-      toast('Sample students for Guardian accounts are being upgraded for the online version — coming very soon.',true);
-      return;
+  function toggleDemoFill(){
+    if(sampleOriginal){
+      const original=sampleOriginal;sampleOriginal=null;sampleEpoch++;
+      state=original.state;linksCache=original.links;studentDataCache=original.students;
+      view.expandedStudent=null;closeModal();render();refreshLinks();
+      toast('Sample preview off. Your real data is visible again.');return;
     }
-    applyDemoFillToState(state,state.profile.name); save(); render();
-    toast('Sample data refreshed.');
+    if(pendingChat || state.focus.status==='running' || state.focus.status==='paused'){
+      toast('Finish your current chat or focus session before opening the sample preview.',true);return;
+    }
+    openModal('Unlock sample preview', '<form id="sample-unlock-form"><p class="modal-copy">For presentation screenshots. Your real data stays separate and returns when you turn this off.</p><div class="field"><label for="sample-password">Presentation password</label><input id="sample-password" name="password" type="password" required autocomplete="off"></div><p class="form-error" id="sample-error"></p><div class="modal-actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Unlock sample data</button></div></form>', 'sample-unlock');
+  }
+  async function unlockSample(form){
+    const button=form.querySelector('[type="submit"]');button.disabled=true;
+    try{
+      const token=await fbAuth.currentUser.getIdToken();
+      const response=await fetch('/api/sample-access',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({password:new FormData(form).get('password')}),signal:AbortSignal.timeout(15000)});
+      if(!response.ok)throw Error(response.status===403?'Incorrect password.':response.status===429?'Too many attempts. Please wait a minute.':'Could not unlock. Please check your connection.');
+      if(currentModal!=='sample-unlock')return;
+      // Flush any pending real save before switching; preview saves never reach Firebase.
+      clearTimeout(saveDebounceTimer);await persistRealState(state);
+      sampleOriginal={state,links:linksCache,students:studentDataCache};sampleEpoch++;
+      fillSamplePreview();closeModal();render();toast('Sample preview is ready for screenshots.');
+    }catch(error){const el=$('#sample-error');if(el)el.textContent=error.message;}
+    finally{button.disabled=false;}
+  }
+  function regenerateDemoFill(){
+    if(!sampleOriginal)return;
+    fillSamplePreview();render();toast('Sample preview refreshed.');
   }
 
 
@@ -1569,6 +1601,11 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
     else if(fbInitialData) recoveryNotice='The saved account data could not be read. A fresh sample has been loaded.';
   } catch(error) { recoveryNotice='Could not read your saved data. A fresh sample has been loaded.'; }
   if(!state) state=blankState();
+  // Restore backups made by the older, cloud-persisted sample mode.
+  if(state.settings.demoFillActive && state._preDemoSnapshot){
+    try{Object.assign(state,JSON.parse(state._preDemoSnapshot));delete state._preDemoSnapshot;}catch{}
+  }
+  state.settings.demoFillActive=false;
   if(!state.profile.onboarded && currentAccount.name) state.profile.name=currentAccount.name;
   if(!paletteIds.has(state.settings.palette)) state.settings.palette='indigo';
   if(!state.apiConfig || typeof state.apiConfig!=='object') state.apiConfig={enabled:false,provider:'gemini',endpoint:'',apiKey:'',model:''};
@@ -1685,6 +1722,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   const shortName=id=>C.apps.find(a=>a.id===id)?.short||'Application';
   const initials=()=>state.profile.name.trim().split(/\s+/).map(x=>x[0]).slice(0,2).join('').toUpperCase()||'A';
   function myAvatar(cls){
+    if(sampleOriginal)return `<span class="avatar ${cls}">${esc(profileInitials(state.profile.name))}</span>`;
     if(currentAccount.photoURL) return `<span class="avatar ${cls}" style="padding:0;overflow:hidden"><img src="${currentAccount.photoURL}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"></span>`;
     return `<span class="avatar ${cls}">${esc(profileInitials(currentAccount.name))}</span>`;
   }
@@ -1703,17 +1741,19 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   const metric=(label,value,note='')=>`<div class="card"><div class="metric-label">${label}</div><div class="metric-value mono">${value}</div><div class="metric-note">${note}</div></div>`;
   const empty=(title,copy,action='')=>`<div class="empty">${I('leaf')}<h3>${title}</h3><p>${copy}</p>${action}</div>`;
   const progress=(percent,color='')=>`<progress class="progress-track" value="${C.clamp(percent,0,100)}" max="100"${color?` style="--bar-color:${color}"`:''}></progress>`;
+  function persistRealState(source){
+    return fbDb.collection('appstate').doc(currentAccount.id).set({state:{...source,sessions:source.sessions.filter(s=>s.origin!=='chrome-extension'),apiConfig:{...source.apiConfig,apiKey:''}},updatedAt:Date.now()},{merge:true});
+  }
   function save() {
-    state.lastSaved=Date.now();
-    storageOK=true;
-    clearTimeout(saveDebounceTimer);
-    saveDebounceTimer=setTimeout(()=>{
-      fbDb.collection('appstate').doc(currentAccount.id).set({state:{...state,sessions:state.sessions.filter(s=>s.origin!=='chrome-extension'),apiConfig:{...state.apiConfig,apiKey:''}},updatedAt:Date.now()},{merge:true}).then(()=>{storageOK=true;}).catch(()=>{storageOK=false;render();});
-    },500);
+    if(sampleOriginal)return;
+    state.lastSaved=Date.now();storageOK=true;clearTimeout(saveDebounceTimer);
+    const realState=state;
+    saveDebounceTimer=setTimeout(()=>persistRealState(realState).then(()=>{storageOK=true;}).catch(()=>{storageOK=false;render();}),500);
   }
   let browserSync=null;
-  function browserCard() { return AegisBrowserSync.card(browserSync); }
+  function browserCard() { return sampleOriginal?'':AegisBrowserSync.card(browserSync); }
   function refreshBrowserUI() {
+    if(sampleOriginal)return;
     const panel=$('#chrome-status-panel');
     if(panel)panel.outerHTML=browserCard();
     if(['home','activity','insights','reports'].includes(view.page)&&!currentModal&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))render();
@@ -1733,10 +1773,10 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
       <aside class="sidebar ${view.mobile?'open':''}"><div class="brand">${brandMark()}<div class="brand-copy"><div class="brand-name">AEGIS</div><div class="brand-sub">DIGITAL WELLBEING</div></div></div>
       <div class="nav-label">EXPLORE</div><nav class="nav-groups" aria-label="Main navigation">${navGroups.map(([group,ids])=>`<div class="nav-group"><div class="nav-group-label">${group}</div>${ids.map(id=>{const [,label,icon]=pages.find(p=>p[0]===id);return `<button class="nav-item ${view.page===id?'active':''}" data-action="navigate" data-page="${id}" title="${label} · ${navDescriptions[id]}" ${view.page===id?'aria-current="page"':''}>${I(icon)}<span class="nav-copy"><span class="nav-text">${label}</span><small class="nav-detail">${navDescriptions[id]}</small></span>${id==='guidance'&&view.page!==id?'<span class="nav-badge">LOCAL</span>':''}</button>`;}).join('')}</div>`).join('')}</nav>
       <div class="sidebar-spacer"></div>
-      <div class="sidebar-foot"><button class="profile-btn" data-action="onboard" aria-label="Set up your demo profile">${myAvatar('')}<span class="profile-meta"><strong>${esc(state.profile.name)}</strong><small>${esc(currentAccount.email||'AEGIS account')}</small></span>${I('chevron','icon-sm')}</button><div class="local-status"><span class="dot status-dot"></span>${storageOK?'Synced to your account':'Saving… check connection'}</div></div></aside>
-      <div class="app-body"><div class="topbar"><div class="flex gap-8"><button class="icon-btn mobile-menu" data-action="mobile-toggle" aria-label="Open navigation">${I('menu')}</button><div class="breadcrumb"><strong>${titles[view.page]}</strong></div></div><div class="top-actions">${btn('How it works','how-it-works','info','btn btn-sm btn-tour')}<button class="icon-btn top-search" data-action="commands" aria-label="Jump to a page" title="Jump to a page · Ctrl K">${I('search')}</button><button class="offline-chip" data-action="about-demo" title="About this offline prototype">${I('lock','icon-sm')}<span>Offline demo</span></button><button class="icon-btn notification-btn" data-action="notifications" aria-label="Notifications${unread?', unread':''}">${I('bell')}${unread?'<span class="notification-badge"></span>':''}</button><details class="account-menu"><summary class="icon-btn account-btn" title="${esc(currentAccount.name)} · ${esc(roleLabels[currentAccount.role]||'Profile')}">${myAvatar('avatar-sm')}</summary><div class="account-dropdown"><div class="account-dropdown-head">${myAvatar('')}<div><strong>${esc(currentAccount.name)}</strong><small>${esc(roleLabels[currentAccount.role]||'Profile')}</small></div></div><button class="account-dropdown-item" data-action="account-photo">${I('edit','icon-sm')}<span>Change photo</span></button><button class="account-dropdown-item" data-action="logout">${I('lock','icon-sm')}<span>Log out</span></button></div></details></div></div>
+      <div class="sidebar-foot"><button class="profile-btn" data-action="onboard" aria-label="Set up your demo profile">${myAvatar('')}<span class="profile-meta"><strong>${esc(state.profile.name)}</strong><small>${esc(sampleOriginal?'Presentation profile':currentAccount.email||'AEGIS account')}</small></span>${I('chevron','icon-sm')}</button><div class="local-status"><span class="dot status-dot"></span>${sampleOriginal?'Sample preview · not saved':storageOK?'Synced to your account':'Saving… check connection'}</div></div></aside>
+      <div class="app-body"><div class="topbar"><div class="flex gap-8"><button class="icon-btn mobile-menu" data-action="mobile-toggle" aria-label="Open navigation">${I('menu')}</button><div class="breadcrumb"><strong>${titles[view.page]}</strong></div></div><div class="top-actions">${btn('How it works','how-it-works','info','btn btn-sm btn-tour')}<button class="icon-btn top-search" data-action="commands" aria-label="Jump to a page" title="Jump to a page · Ctrl K">${I('search')}</button><button class="offline-chip" data-action="about-demo" title="About this offline prototype">${I('lock','icon-sm')}<span>Offline demo</span></button><button class="icon-btn notification-btn" data-action="notifications" aria-label="Notifications${unread?', unread':''}">${I('bell')}${unread?'<span class="notification-badge"></span>':''}</button><details class="account-menu"><summary class="icon-btn account-btn" title="${esc(sampleOriginal?state.profile.name:currentAccount.name)} · ${esc(roleLabels[currentAccount.role]||'Profile')}">${myAvatar('avatar-sm')}</summary><div class="account-dropdown"><div class="account-dropdown-head">${myAvatar('')}<div><strong>${esc(sampleOriginal?state.profile.name:currentAccount.name)}</strong><small>${esc(roleLabels[currentAccount.role]||'Profile')}</small></div></div><button class="account-dropdown-item" data-action="account-photo">${I('edit','icon-sm')}<span>Change photo</span></button><button class="account-dropdown-item" data-action="logout">${I('lock','icon-sm')}<span>Log out</span></button></div></details></div></div>
       ${!storageOK?'<div class="storage-warning">Browser storage is unavailable. Changes are kept only for this open session. Export your data to keep a copy.</div>':''}
-      <main id="main" class="main-content" tabindex="-1"><div class="page-content">${renderPage()}</div><footer class="page-footer"><span class="flex">${I('shield','icon-sm')}AEGIS · Digital wellbeing made visible.</span><span>International science competition prototype · Demo data · Fully offline</span></footer></main></div>`;
+      <main id="main" class="main-content" tabindex="-1"><div class="page-content">${sampleOriginal?`<div class="notice notice-soft"><div><strong>SAMPLE PREVIEW</strong> · Fictional data for presentation. ${btn('Show real data','demo-fill-toggle','','btn btn-sm')}</div></div>`:''}${renderPage()}</div><footer class="page-footer"><span class="flex">${I('shield','icon-sm')}AEGIS · Digital wellbeing made visible.</span><span>International science competition prototype · Demo data · Fully offline</span></footer></main></div>`;
   }
   function render() {
     AegisChromeUsage.rebaseState(state);
@@ -2174,6 +2214,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
     notifyNative('AEGIS · Time for a short break',msg);
   }
   function updateTimers() {
+    if(sampleOriginal)return;
     if(state.focus.status==='running' && remainingSeconds()===0) {finishFocus(true);return;}
     const seconds=remainingSeconds();
     $$('[data-focus-time]').forEach(node=>{node.textContent=timeString(seconds);});
@@ -2454,6 +2495,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   document.addEventListener('click',event=>{
     const el=event.target.closest('[data-action]');if(!el||el.disabled)return;
     const action=el.dataset.action;
+    if(sampleOriginal && !['navigate','mobile-close','mobile-toggle','commands','backdrop','close-modal','demo-fill-toggle','demo-fill-regenerate','toggle-student-detail','chart-day','app-detail','report-period','activity-prev','activity-next','palette','theme','print-report','export-report','export-csv','export-json','page-help','how-it-works','notifications','about-demo','logout'].includes(action)){event.preventDefault();toast('Sample preview is read-only. Turn it off to make changes.');return;}
     if(action==='backdrop'){if(event.target===el)closeModal();return;}
     if(actions[action]){event.preventDefault();actions[action](el);}
   });
@@ -2488,6 +2530,8 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   });
   document.addEventListener('submit',event=>{
     const form=event.target;
+    if(form.id==='sample-unlock-form'){event.preventDefault();unlockSample(form);return;}
+    if(sampleOriginal){event.preventDefault();toast('Sample preview is read-only. Your real data is unchanged.');return;}
     if(!['chat-form','limit-form','profile-form','rename-chat-form','focus-custom-form','api-config-form','habit-form','add-student-form','guardian-limit-form','guardian-note-form'].includes(form.id))return;
     event.preventDefault();const data=new FormData(form);
     if(form.id==='chat-form')sendChat(data.get('message'));
@@ -2566,7 +2610,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   window.addEventListener('hashchange',()=>{const page=location.hash.slice(1);if(titles[page]&&page!==view.page){view.page=page;render();}});
   window.addEventListener('beforeunload',save);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateTimers();});
-  browserSync=AegisBrowserSync.create({accountId:currentAccount.id,auth:fbAuth,db:fbDb,getState:()=>state,onUpdate:refreshBrowserUI});
+  browserSync=AegisBrowserSync.create({accountId:currentAccount.id,auth:fbAuth,db:fbDb,getState:()=>sampleOriginal?sampleOriginal.state:state,onUpdate:refreshBrowserUI});
   window.aegisDisposeBrowserSync=()=>browserSync?.dispose();
   save();render();
   setInterval(updateTimers,250);
