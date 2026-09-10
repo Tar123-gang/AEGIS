@@ -1223,7 +1223,14 @@ progress.app-bar::-moz-progress-bar {background:var(--bar-color,var(--accent));b
   const fbDb = firebase.firestore();
   const googleProvider = new firebase.auth.GoogleAuthProvider();
 </script>
-</head>
+<style>
+.notification-btn .notification-badge{width:auto;min-width:16px;height:16px;padding:0 4px;top:0;right:-4px;border-radius:10px;background:#d93649;color:#fff;font:700 9px/16px system-ui;text-align:center;box-shadow:0 0 0 2px var(--surface)}
+.notification-btn.has-unread>.icon{transform-origin:50% 15%;animation:aegis-bell 3s ease-in-out 3}
+@keyframes aegis-bell{0%,35%,100%{transform:rotate(0)}5%,15%{transform:rotate(16deg)}10%,20%{transform:rotate(-16deg)}25%{transform:rotate(8deg)}30%{transform:rotate(-8deg)}}
+.notification-unread{background:var(--accent-dim);border-left:3px solid #d93649;padding:14px;border-radius:10px}.notifications-list{display:grid;gap:12px;max-height:60vh;overflow:auto}.notification button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(prefers-reduced-motion:reduce){.notification-btn.has-unread>.icon{animation:none}}
+html[data-reduced-motion="true"] .notification-btn.has-unread>.icon{animation:none}
+</style></head>
 <body>
   <a href="#main" class="skip-link">Skip to content</a>
   <div id="app"></div>
@@ -1462,7 +1469,8 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
         if(sampleOriginal || requestEpoch!==sampleEpoch)return;
         linksCache=snap.docs.map(d=>({id:d.id,...d.data()}));
       }
-      render();
+      refreshNotificationUI();
+      if(['linked','settings'].includes(view.page)&&!currentModal&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))render();
     }catch(err){ console.error('refreshLinks failed',err); }
   }
   function pendingGuardianRequestsForMe(){ return linksCache.filter(l=>l.status==='pending'); }
@@ -1470,17 +1478,17 @@ async function bootApp(fbUser, fbProfile, fbInitialData) {
   async function respondToGuardianRequest(linkId,accept){
     try{
       if(accept){
-        await fbDb.collection('links').doc(linkId).update({status:'active'});
+        await fbDb.collection('links').doc(linkId).update({status:'active',respondedAt:Date.now()});
         toast('You\'re now sharing your summary.');
       } else {
-        await fbDb.collection('links').doc(linkId).update({status:'declined'});
+        await fbDb.collection('links').doc(linkId).update({status:'declined',respondedAt:Date.now()});
         toast('Request declined.');
       }
       await refreshLinks();
     }catch(err){ toast('Could not update — check your connection.',true); }
   }
   function unlinkGuardian(linkId){
-    fbDb.collection('links').doc(linkId).update({status:'declined'}).then(refreshLinks).catch(()=>toast('Could not unlink — check your connection.',true));
+    fbDb.collection('links').doc(linkId).update({status:'declined',respondedAt:Date.now()}).then(refreshLinks).catch(()=>toast('Could not unlink — check your connection.',true));
   }
 
   /* ---- Sample-data fill (for screenshots/demos) ---- */
@@ -1759,20 +1767,38 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   function browserHelp() { openModal('Install AEGIS Chrome tracking',AegisBrowserSync.installation(),'chrome-help',true); }
   function notificationItems() {
     const result=[...state.notifications];
+    for(const link of linksCache){
+      const who=role==='guardian'?link.studentName:link.guardianName;
+      const pending=link.status==='pending',active=link.status==='active';
+      if(!['pending','active','declined','replaced'].includes(link.status))continue;
+      result.push({id:'link-'+link.id+'-'+link.status+'-'+(link.requestedAt||0),icon:'shield',
+        title:pending?(role==='student'?'Guardian connection request':'Invitation pending'):active?'Connection active':'Connection ended or declined',
+        text:pending?(role==='student'?(who||'A guardian')+' wants to see your activity summary. Accept only if you want to share.':'Waiting for '+(who||'the student')+' to accept.'):
+          active?'You are linked with '+(who||'this profile')+'.':(who||'This profile')+' is no longer linked through this request.',
+        page:role==='guardian'?'linked':'settings',link:link.id,request:pending&&role==='student',time:link.respondedAt||link.requestedAt||0});
+    }
+    for(const note of state.guardianNotes||[])result.push({id:'guardian-note-'+note.id,title:'A note from '+(note.from||'your guardian'),text:note.text,icon:'heart',page:'settings',time:note.time||0});
+    if(role==='guardian'){
+      for(const link of linksCache.filter(l=>l.status==='active')){
+        const data=studentDataCache[link.studentUid];if(!data)continue;
+        for(const alert of studentAlerts(data))result.push({id:'student-alert-'+link.id+'-'+C.localDate(new Date())+'-'+alert.split('(')[0],title:(link.studentName||'Student')+' needs attention',text:alert,icon:'bell',page:'linked',link:link.id});
+      }
+      return result.sort((a,b)=>(b.time||0)-(a.time||0));
+    }
     const s=C.summarize(state),delta=C.weeklyChange(state);
-    if(delta!==null) result.push({id:'weekly-ready',title:'Your weekly review is ready',text:`${Math.abs(delta)}% ${delta<=0?'less':'more'} usage than the previous sample week. Today is still in progress.`,icon:'report',page:'reports'});
-    if(s.total>=state.target) result.unshift({id:`target-${state.target}`,title:'Daily target reached',text:`${C.duration(s.total)} recorded against your ${C.duration(state.target)} goal. Make a little room for a break.`,icon:'target',page:'target'});
-    state.limits.forEach(l=>{const info=C.limitStatus(state,l.appId);if(info&&info.ratio>=.9)result.unshift({id:`limit-${l.appId}-${l.minutes}-${info.ratio>=1?'reached':'near'}`,title:`${shortName(l.appId)} ${info.ratio>=1?'limit reached':'is near its limit'}`,text:`${C.duration(info.used)} recorded of a ${C.duration(info.minutes)} daily reminder. This demo does not block apps.`,icon:'bell',page:'target'});});
+    if(delta!==null) result.push({id:'weekly-ready-'+state.anchor,title:'Your weekly review is ready',text:`${Math.abs(delta)}% ${delta<=0?'less':'more'} usage than the previous sample week. Today is still in progress.`,icon:'report',page:'reports'});
+    if(s.total>=state.target) result.unshift({id:`target-${state.anchor}-${state.target}`,title:'Daily target reached',text:`${C.duration(s.total)} recorded against your ${C.duration(state.target)} goal. Make a little room for a break.`,icon:'target',page:'target'});
+    state.limits.forEach(l=>{const info=C.limitStatus(state,l.appId);if(info&&info.ratio>=.9)result.unshift({id:`limit-${state.anchor}-${l.appId}-${l.minutes}-${info.ratio>=1?'reached':'near'}`,title:`${shortName(l.appId)} ${info.ratio>=1?'limit reached':'is near its limit'}`,text:`${C.duration(info.used)} recorded of a ${C.duration(info.minutes)} daily reminder. This demo does not block apps.`,icon:'bell',page:'target'});});
     return result;
   }
   function shell() {
-    const unread=notificationItems().some(n=>!state.seenNotifications.includes(n.id));
+    const unread=notificationItems().filter(n=>!state.seenNotifications.includes(n.id)).length;
     return `<button class="mobile-scrim ${view.mobile?'visible':''}" data-action="mobile-close" aria-label="Close navigation"></button>
       <aside class="sidebar ${view.mobile?'open':''}"><div class="brand">${brandMark()}<div class="brand-copy"><div class="brand-name">AEGIS</div><div class="brand-sub">DIGITAL WELLBEING</div></div></div>
       <div class="nav-label">EXPLORE</div><nav class="nav-groups" aria-label="Main navigation">${navGroups.map(([group,ids])=>`<div class="nav-group"><div class="nav-group-label">${group}</div>${ids.map(id=>{const [,label,icon]=pages.find(p=>p[0]===id);return `<button class="nav-item ${view.page===id?'active':''}" data-action="navigate" data-page="${id}" title="${label} · ${navDescriptions[id]}" ${view.page===id?'aria-current="page"':''}>${I(icon)}<span class="nav-copy"><span class="nav-text">${label}</span><small class="nav-detail">${navDescriptions[id]}</small></span>${id==='guidance'&&view.page!==id?'<span class="nav-badge">LOCAL</span>':''}</button>`;}).join('')}</div>`).join('')}</nav>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-foot"><button class="profile-btn" data-action="onboard" aria-label="Set up your demo profile">${myAvatar('')}<span class="profile-meta"><strong>${esc(state.profile.name)}</strong><small>${esc(sampleOriginal?'Presentation profile':currentAccount.email||'AEGIS account')}</small></span>${I('chevron','icon-sm')}</button><div class="local-status"><span class="dot status-dot"></span>${sampleOriginal?'Sample preview · not saved':storageOK?'Synced to your account':'Saving… check connection'}</div></div></aside>
-      <div class="app-body"><div class="topbar"><div class="flex gap-8"><button class="icon-btn mobile-menu" data-action="mobile-toggle" aria-label="Open navigation">${I('menu')}</button><div class="breadcrumb"><strong>${titles[view.page]}</strong></div></div><div class="top-actions">${btn('How it works','how-it-works','info','btn btn-sm btn-tour')}<button class="icon-btn top-search" data-action="commands" aria-label="Jump to a page" title="Jump to a page · Ctrl K">${I('search')}</button><button class="offline-chip" data-action="about-demo" title="About this offline prototype">${I('lock','icon-sm')}<span>Offline demo</span></button><button class="icon-btn notification-btn" data-action="notifications" aria-label="Notifications${unread?', unread':''}">${I('bell')}${unread?'<span class="notification-badge"></span>':''}</button><details class="account-menu"><summary class="icon-btn account-btn" title="${esc(sampleOriginal?state.profile.name:currentAccount.name)} · ${esc(roleLabels[currentAccount.role]||'Profile')}">${myAvatar('avatar-sm')}</summary><div class="account-dropdown"><div class="account-dropdown-head">${myAvatar('')}<div><strong>${esc(sampleOriginal?state.profile.name:currentAccount.name)}</strong><small>${esc(roleLabels[currentAccount.role]||'Profile')}</small></div></div><button class="account-dropdown-item" data-action="account-photo">${I('edit','icon-sm')}<span>Change photo</span></button><button class="account-dropdown-item" data-action="logout">${I('lock','icon-sm')}<span>Log out</span></button></div></details></div></div>
+      <div class="app-body"><div class="topbar"><div class="flex gap-8"><button class="icon-btn mobile-menu" data-action="mobile-toggle" aria-label="Open navigation">${I('menu')}</button><div class="breadcrumb"><strong>${titles[view.page]}</strong></div></div><div class="top-actions">${btn('How it works','how-it-works','info','btn btn-sm btn-tour')}<button class="icon-btn top-search" data-action="commands" aria-label="Jump to a page" title="Jump to a page · Ctrl K">${I('search')}</button><button class="offline-chip" data-action="about-demo" title="About this offline prototype">${I('lock','icon-sm')}<span>Offline demo</span></button>${notificationBell()}<details class="account-menu"><summary class="icon-btn account-btn" title="${esc(sampleOriginal?state.profile.name:currentAccount.name)} · ${esc(roleLabels[currentAccount.role]||'Profile')}">${myAvatar('avatar-sm')}</summary><div class="account-dropdown"><div class="account-dropdown-head">${myAvatar('')}<div><strong>${esc(sampleOriginal?state.profile.name:currentAccount.name)}</strong><small>${esc(roleLabels[currentAccount.role]||'Profile')}</small></div></div><button class="account-dropdown-item" data-action="account-photo">${I('edit','icon-sm')}<span>Change photo</span></button><button class="account-dropdown-item" data-action="logout">${I('lock','icon-sm')}<span>Log out</span></button></div></details></div></div>
       ${!storageOK?'<div class="storage-warning">Browser storage is unavailable. Changes are kept only for this open session. Export your data to keep a copy.</div>':''}
       <main id="main" class="main-content" tabindex="-1"><div class="page-content">${sampleOriginal?`<div class="notice notice-soft"><div><strong>SAMPLE PREVIEW</strong> · Fictional data for presentation. ${btn('Show real data','demo-fill-toggle','','btn btn-sm')}</div></div>`:''}${renderPage()}</div><footer class="page-footer"><span class="flex">${I('shield','icon-sm')}AEGIS · Digital wellbeing made visible.</span><span>International science competition prototype · Demo data · Fully offline</span></footer></main></div>`;
   }
@@ -2135,10 +2161,29 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
     const b=C.balance(state);
     openModal('A score you can understand.',`<div class="flex gap-20">${ring(b.score)}<div><h3>${b.label}</h3><p class="modal-copy mt-8">A transparent habit indicator for this demo, not a clinical or validated health score.</p></div></div>${b.score===null?'<p class="modal-copy mt-24">Record a session first. A day without data has no score.</p>':`<div class="score-factors mt-20">${b.deductions.map(d=>`<div class="factor"><div class="between"><span>${d.name}</span><strong class="muted">−${d.value}</strong></div>${progress(d.value/d.max*100,'var(--purple)')}</div>`).join('')}</div><div class="score-formula mt-16">100 − ${b.deductions.map(d=>d.value).join(' − ')} ≈ ${b.score}<br>Rounded once, then bounded from 0 to 100.</div><p class="modal-copy mt-16">Deductions consider target pressure, switches per active hour, sessions over 45 minutes, activity between 11 pm and 6 am, and the share of social, entertainment, and gaming time. Thresholds are illustrative design choices.</p>`}<div class="modal-actions">${btn('That makes sense','close-modal','','btn btn-primary')}</div>`,'score',true);
   }
-  function showNotifications() {
-    const notifications=notificationItems();
-    state.seenNotifications=[...new Set([...state.seenNotifications,...notifications.map(n=>n.id)])];save();render();
-    openModal('A few things to notice.',`<div class="notifications-list">${notifications.length?notifications.map(n=>`<div class="notification"><span class="insight-mark">${I(n.icon)}</span><div><h3>${esc(n.title)}</h3><p>${esc(n.text)}</p>${n.page?go('Take a look',n.page,'arrow','text-btn'):''}</div></div>`).join(''):empty('All quiet here','There are no reminders right now.')}</div><p class="text-sm faint mt-24">In-page prototype notices. No native desktop notifications are sent.</p>`,'notifications');
+  function notificationBell(){
+    const count=notificationItems().filter(n=>!state.seenNotifications.includes(n.id)).length;
+    return '<button class="icon-btn notification-btn '+(count?'has-unread':'')+'" data-action="notifications" aria-label="Notifications, '+count+' unread">'+I('bell')+(count?'<span class="notification-badge" aria-hidden="true">'+(count>99?'99+':count)+'</span>':'')+'</button>';
+  }
+  function markNotification(id){
+    state.seenNotifications=[...new Set([...state.seenNotifications,id])].slice(-500);save();
+  }
+  function notificationPanel(){
+    const items=notificationItems().sort((a,b)=>Number(state.seenNotifications.includes(a.id))-Number(state.seenNotifications.includes(b.id)));
+    return '<div id="notification-panel"><div class="between mb-16"><p class="text-sm muted">Connections, messages and activity updates</p>'+btn('Mark all read','notifications-read-all','','btn btn-sm')+'</div><div class="notifications-list">'+(items.length?items.map(n=>{
+      const unread=!state.seenNotifications.includes(n.id);
+      return '<article class="notification '+(unread?'notification-unread':'')+'"><span class="insight-mark">'+I(n.icon)+'</span><div style="flex:1;min-width:0"><button class="text-btn" style="text-align:left" data-action="notification-open" data-id="'+esc(n.id)+'"><strong>'+esc(n.title)+'</strong></button><p>'+esc(n.text)+'</p>'+(n.time?'<small class="faint">'+esc(new Date(n.time).toLocaleString())+'</small>':'')+'<div class="flex wrap gap-8 mt-8">'+(n.request?btn('Accept','notification-respond','check','btn btn-primary btn-sm','data-id="'+esc(n.id)+'" data-link="'+esc(n.link)+'" data-accept="1"')+btn('Decline','notification-respond','','btn btn-sm','data-id="'+esc(n.id)+'" data-link="'+esc(n.link)+'" data-accept="0"'):'')+btn('Open','notification-open','arrow','btn btn-sm','data-id="'+esc(n.id)+'"')+(unread?btn('Mark read','notification-read','','text-btn','data-id="'+esc(n.id)+'"'):'')+'</div></div></article>';
+    }).join(''):empty('All caught up','New updates will appear here.'))+'</div><p class="text-sm faint mt-16" aria-live="polite">Notifications appear while AEGIS is open.</p></div>';
+  }
+  function refreshNotificationUI(){
+    const bell=$('.notification-btn');if(bell)bell.outerHTML=notificationBell();
+    const panel=$('#notification-panel');if(panel)panel.outerHTML=notificationPanel();
+  }
+  function showNotifications(){openModal('Notifications',notificationPanel(),'notifications');}
+  function openNotification(el){
+    const item=notificationItems().find(n=>n.id===el.dataset.id);if(!item)return;
+    markNotification(item.id);if(item.link&&role==='guardian')view.expandedStudent=item.link;
+    closeModal();navigate(item.page&&titles[item.page]?item.page:role==='guardian'?'linked':'home');
   }
   function showOnboarding() {
     const step=view.onboardStep;
@@ -2375,6 +2420,15 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
     'page-demo-start':()=>{view.story=1;navigate('lab');},
     'score':showScore,
     'notifications':showNotifications,
+    'notification-open':openNotification,
+    'notification-read':el=>{markNotification(el.dataset.id);refreshNotificationUI();},
+    'notifications-read-all':()=>{state.seenNotifications=[...new Set([...state.seenNotifications,...notificationItems().map(n=>n.id)])].slice(-500);save();refreshNotificationUI();},
+    'notification-respond':async el=>{
+      const link=linksCache.find(l=>l.id===el.dataset.link&&l.status==='pending');if(!link)return;
+      el.disabled=true;await respondToGuardianRequest(link.id,el.dataset.accept==='1');
+      if(linksCache.find(l=>l.id===link.id)?.status!=='pending')markNotification(el.dataset.id);
+      refreshNotificationUI();
+    },
     'commands':openCommands,
     'trend-days':el=>{view.trendDays=Number(el.dataset.days);render();},
     'chart-day':el=>{const day=Number(el.dataset.day);view.activityDay=day;view.activityRange=day===0?'today':day===-1?'yesterday':day>=-6?'week':'fortnight';view.activityApp='all';view.activityCategory='all';view.activityPage=0;navigate('activity');},
@@ -2436,7 +2490,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
     'clear-ai-cache':()=>{const n=Object.keys(state.aiCache).length;if(!n){toast('Cache is already empty.');return;}if(confirm(`Clear ${n} cached answer${n===1?'':'s'}? Repeat questions will call the API again next time.`)){state.aiCache={};save();render();toast('Cache cleared.');}},
     'api-test':()=>{const provider=$('#api-provider')?.value==='custom'?'custom':'gemini';const endpoint=$('#api-endpoint')?.value.trim()||'';const apiKey=$('#api-key')?.value.trim()||'';if(provider==='gemini'?!apiKey:!endpoint){toast(provider==='gemini'?'Add your Gemini API key first.':'Add an endpoint URL first.',true);return;}state.apiConfig.provider=provider;state.apiConfig.endpoint=endpoint;state.apiConfig.apiKey=apiKey;state.apiConfig.model=$('#api-model')?.value.trim()||'';toast('Sending a test message…');fetchAIReply('Say hello in one short sentence.').then(answer=>toast(`API responded: ${answer.text.slice(0,140)}`)).catch(error=>toast(`Test failed: ${error.message}`,true));},
     'switch-profile':()=>{save();fbAuth.signOut();},
-    'logout':()=>{browserSync?.dispose();fbAuth.signOut().then(()=>location.reload());},
+    'logout':()=>{window.aegisDisposeBrowserSync?.();fbAuth.signOut().then(()=>location.reload());},
     'fontsize':el=>{const dir=Number(el.dataset.dir);const next=Math.min(130,Math.max(85,state.settings.fontSize+dir*5));if(next!==state.settings.fontSize){state.settings.fontSize=next;save();render();}},
     'fontsize-reset':()=>{state.settings.fontSize=100;save();render();},
     'onboard':()=>{view.onboardMode='profile';view.onboardStep=1;view.onboardName=state.profile.name;view.onboardGoals=[...state.profile.goals];showOnboarding();},
@@ -2493,7 +2547,7 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   document.addEventListener('click',event=>{
     const el=event.target.closest('[data-action]');if(!el||el.disabled)return;
     const action=el.dataset.action;
-    if(sampleOriginal && !['navigate','mobile-close','mobile-toggle','commands','backdrop','close-modal','demo-fill-toggle','demo-fill-regenerate','toggle-student-detail','chart-day','app-detail','report-period','activity-prev','activity-next','palette','theme','print-report','export-report','export-csv','export-json','page-help','how-it-works','notifications','about-demo','logout'].includes(action)){event.preventDefault();toast('Sample preview is read-only. Turn it off to make changes.');return;}
+    if(sampleOriginal && !['navigate','mobile-close','mobile-toggle','commands','backdrop','close-modal','demo-fill-toggle','demo-fill-regenerate','toggle-student-detail','chart-day','app-detail','report-period','activity-prev','activity-next','palette','theme','print-report','export-report','export-csv','export-json','page-help','how-it-works','notifications','about-demo','logout','notification-open','notification-read','notifications-read-all'].includes(action)){event.preventDefault();toast('Sample preview is read-only. Turn it off to make changes.');return;}
     if(action==='backdrop'){if(event.target===el)closeModal();return;}
     if(actions[action]){event.preventDefault();actions[action](el);}
   });
@@ -2619,7 +2673,16 @@ const brandMark=()=>'<span class="brand-mark" aria-hidden="true" style="display:
   window.addEventListener('beforeunload',save);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateTimers();});
   browserSync=AegisBrowserSync.create({accountId:currentAccount.id,auth:fbAuth,db:fbDb,getState:()=>sampleOriginal?sampleOriginal.state:state,onUpdate:refreshBrowserUI});
-  window.aegisDisposeBrowserSync=()=>browserSync?.dispose();
+  const linkPoll=setInterval(()=>{if(!document.hidden&&!sampleOriginal&&(role==='guardian'||role==='student'))refreshLinks();},15000);
+  const noteUnsubscribe=fbDb.collection('appstate').doc(currentAccount.id).onSnapshot(snap=>{
+    if(!snap.exists||snap.metadata.hasPendingWrites)return;
+    const notes=snap.data().state?.guardianNotes;
+    if(Array.isArray(notes)){
+      const target=sampleOriginal?sampleOriginal.state:state;
+      if(JSON.stringify(target.guardianNotes)!==JSON.stringify(notes)){target.guardianNotes=notes;if(!sampleOriginal)refreshNotificationUI();}
+    }
+  },()=>{});
+  window.aegisDisposeBrowserSync=()=>{browserSync?.dispose();clearInterval(linkPoll);noteUnsubscribe();};
   save();render();
   setInterval(updateTimers,250);
   if(shouldShowWelcome)setTimeout(()=>{view.onboardMode='welcome';view.onboardStep=0;view.onboardName=state.profile.name;view.onboardGoals=[...state.profile.goals];showOnboarding();},220);
